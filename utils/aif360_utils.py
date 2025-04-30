@@ -139,7 +139,7 @@ def make_aif360_dataset_balanced(aifdataset, by='label_attr', strategy='random',
             
 
 
-def tabular_data_loader(dataset_used, protected_attribute_used):
+def tabular_data_loader(dataset_used, protected_attribute_used, acsstates=['CA']):
     if dataset_used == "adult":
         if protected_attribute_used == 1:
             privileged_groups = [{'sex': 1}]
@@ -199,11 +199,115 @@ def tabular_data_loader(dataset_used, protected_attribute_used):
                      'li_alpha':1,
                      'li_beta':0.2,
                      'li_gamma':0.1}
+    
+    elif dataset_used == "acsincome":
+        from aif360.datasets import StandardDataset
+
+        attr = "sex" if protected_attribute_used == 1 else "race"
+        X, y, a, feature_names, label_name, protected_attribute_names = load_ACSINCOME_data(sensitive_attribute=attr, download=True, states=acsstates)
+
+        # Convert to Pandas DataFrame
+        df = pd.DataFrame(X, columns=feature_names)
+        df[label_name] = y
+        df[protected_attribute_names[0]] = a  # Add protected attribute
+
+        # Define privileged and unprivileged groups
+        if protected_attribute_used == 1:
+            privileged_groups = [{'SEX': 1}]  # Male is privileged
+            unprivileged_groups = [{'SEX': 0}]  # Female is unprivileged
+            privileged_classes = [[1]]  # Male = 1
+        else:
+            privileged_groups = [{'RAC1P': 1}]  # White is privileged
+            unprivileged_groups = [{'RAC1P': 0}]  # Non-white is unprivileged
+            privileged_classes = [[1]]  # White = 1
+
+        # Convert to AIF360 StandardDataset
+        dataset_orig = StandardDataset(
+            df, 
+            label_name=label_name,
+            favorable_classes=[1],  # Favorable outcome (income > $50K)
+            protected_attribute_names=protected_attribute_names,
+            privileged_classes=privileged_classes
+        )
+
+        if protected_attribute_used == 1:
+            dataset_orig.metadata['label_maps'] = [{1.0: '>50K', 0.0: '<=50K'}]
+            dataset_orig.metadata['protected_attribute_maps'] = [{1.0: 'Male', 0.0: 'Female'}]
+        else:
+            dataset_orig.metadata['label_maps'] = [{1.0: '>50K', 0.0: '<=50K'}]
+            dataset_orig.metadata['protected_attribute_maps'] = [{1.0: 'White', 0.0: 'Non-White'}]
+
+        #Params for specific methods
+        optim_options = {
+            "distortion_fun": None,  # Define if necessary
+            "epsilon": 0.05,
+            "clist": [0.99, 1.99, 2.99],
+            "dlist": [.1, 0.05, 0]
+        }
+        IF_params = {'li_l2_reg': 10.0, 'li_alpha': 1, 'li_beta': 0.2, 'li_gamma': 0.1} 
+
     else:
-        raise ValueError(f"Dataset name invalid: {dataset_used}")
+        raise ValueError(f"Dataset not implemented: {dataset_used}")
     
     return dataset_orig, privileged_groups, unprivileged_groups, optim_options, IF_params
 
+def load_ACSINCOME_data(path='../data',
+                  download=True,
+                  sensitive_attribute="sex",
+                  survey_year="2018", 
+                  states=["CA"],
+                  horizon="1-Year",
+                  survey='person'):
+    """Load ACS. Currently optimized for INCOME target attribute (columns and labels are hardcoded for that problem).
+       Preprocessed to be binary classification and binary sensitive attribute.
+       Favorable Label and Privileged group are encoded as 1, 0 for the rest.
+       'sex': {0: Female, 1: Male}, 'race': {0: White, 1: Non-White}
+
+    Args:
+        path (str, optional): save data on this folder. Defaults to '../data'.
+        sensitive_attribute (str, optional): _description_. Defaults to "sex".
+        survey_year (str, optional): selected year. Defaults to "2018".
+        states (list, optional): selected state. Defaults to ["CA"]. WE CAN CHOOSE AL STATES FROM USA.
+        horizon (str, optional): IDK. Defaults to "1-Year".
+        survey (str, optional): IDK. Defaults to 'person'.
+
+    Returns:
+        X, Y, S: tensors with complete dataset (features, label, sensitive attribute). Sensitive attribute IS NOT in the features.
+    """
+    from folktables import ACSDataSource
+
+    data_source = ACSDataSource(survey_year=survey_year, horizon=horizon, survey=survey, root_dir=path)
+    data = data_source.get_data(states=states, download=download)
+
+    #Filter data instances by default filters detailed on original paper
+    f = (data['PINCP']>100) & (data['AGEP']>16) & (data['WKHP']>0) & (data['PWGTP'] >= 1)
+    data = data[f]
+
+    #Select features as in the orignal implementation and paper (there are 300 hundred features in the original dataset)
+    feature_names = ['AGEP','COW','SCHL','MAR','OCCP','POBP','RELP','WKHP','SEX','RAC1P']
+    features = data[feature_names]
+    y = data['PINCP'] > 50000
+    y = y.astype(np.int32).to_numpy()
+    label_name = "PINCP"
+
+    protected_attribute_names = list()
+
+    if sensitive_attribute == "sex":
+        a = (data["SEX"] == 1).astype(np.int32).to_numpy()
+        X = features.drop(columns=["SEX"]).to_numpy()
+        protected_attribute_names.append("SEX")
+        feature_names.remove("SEX")
+
+
+    elif sensitive_attribute == "race":
+        a = (data["RAC1P"] == 1).astype(np.int32).to_numpy() # white = 1 vs non-white = 0
+        X = features.drop(columns=["RAC1P"]).to_numpy()
+        protected_attribute_names.append("RAC1P")
+        feature_names.remove("RAC1P")
+
+    X = np.nan_to_num(X, -1)
+
+    return X, y, a, feature_names, label_name, protected_attribute_names
 
 def standarize_aif360_data(dataset):
 
